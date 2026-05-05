@@ -1,0 +1,10 @@
+{
+  "name": "@ari/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prisma:validate": "DATABASE_URL=${DATABASE_URL:-postgresql://ari:ari@localhost:5432/ari} prisma validate --schema prisma/schema.prisma",
+    "prisma:generate": "DATABASE_URL=${DATABASE_URL:-postgresql://ari:ari@localhost:5432/ari} prisma generate --schema prisma/schema.prisma"
+  }
+}

@@ -1,0 +1,591 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  RENTER
+  ADMIN
+  OPS
+  DEVELOPER
+}
+
+enum SearchStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum ListingSource {
+  RENTCAST
+  LANDLORD_FEED
+  USER_URL
+  INTERNAL_MANUAL
+}
+
+enum ListingStatus {
+  ACTIVE
+  PENDING
+  RENTED
+  STALE
+  UNKNOWN
+}
+
+enum MessageChannel {
+  email
+  sms
+  whatsapp
+}
+
+enum MessageDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum TourStatus {
+  REQUESTED
+  PROPOSED
+  USER_APPROVED
+  CONFIRMED
+  CONFIRMED_CALENDAR_FAILED
+  RESCHEDULE_REQUESTED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum AgentRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BLOCKED
+  NEEDS_APPROVAL
+}
+
+enum ToolCallStatus {
+  PENDING
+  APPROVED
+  EXECUTED
+  FAILED
+  BLOCKED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  phone     String?
+  role      UserRole @default(RENTER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  profile        RenterProfile?
+  consents       UserConsent[]
+  searchSessions SearchSession[]
+  savedListings  SavedListing[]
+  conversations  Conversation[]
+  tours          Tour[]
+  documents      ApplicationDocument[]
+  packets        ApplicationPacket[]
+  approvals      Approval[]
+  auditLogs      AuditLog[]           @relation("ActorAuditLogs")
+
+  @@map("users")
+}
+
+model RenterProfile {
+  id                   String   @id @default(cuid())
+  userId               String   @unique @map("user_id")
+  legalName            String?  @map("legal_name")
+  targetCity           String?  @map("target_city")
+  moveInDate           DateTime? @map("move_in_date")
+  budgetMin            Int?     @map("budget_min")
+  budgetMax            Int?     @map("budget_max")
+  bedroomsMin          Int      @default(0) @map("bedrooms_min")
+  bathroomsMin         Float?   @map("bathrooms_min")
+  profileJson          Json     @default("{}") @map("profile_json")
+  applicationReadiness String   @default("NOT_STARTED") @map("application_readiness")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("renter_profiles")
+}
+
+model UserConsent {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  type        String
+  status      String
+  scope       String
+  constraints Json      @default("{}")
+  grantedAt   DateTime  @map("granted_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type, status])
+  @@map("user_consents")
+}
+
+model SearchSession {
+  id                   String       @id @default(cuid())
+  userId               String       @map("user_id")
+  status               SearchStatus @default(DRAFT)
+  criteriaJson         Json         @map("criteria_json")
+  automationPolicyJson Json         @map("automation_policy_json")
+  startedAt            DateTime?    @map("started_at")
+  pausedAt             DateTime?    @map("paused_at")
+  completedAt          DateTime?    @map("completed_at")
+  createdAt            DateTime     @default(now()) @map("created_at")
+  updatedAt            DateTime     @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listingScores ListingScore[]
+  savedListings SavedListing[]
+  agentRuns     AgentRun[]
+
+  @@index([userId, status])
+  @@map("search_sessions")
+}
+
+model Listing {
+  id                String        @id @default(cuid())
+  source            ListingSource
+  sourceListingId   String?       @map("source_listing_id")
+  sourceUrl         String?       @map("source_url")
+  canonicalHash     String?       @map("canonical_hash")
+  status            ListingStatus @default(UNKNOWN)
+  confidence        Float
+  title             String?
+  description       String?
+  addressRaw        String        @map("address_raw")
+  addressNormalized String?       @map("address_normalized")
+  unit              String?
+  city              String
+  state             String
+  zip               String?
+  lat               Float?
+  lng               Float?
+  price             Int
+  bedrooms          Float
+  bathrooms         Float?
+  squareFeet        Int?          @map("square_feet")
+  availableDate     DateTime?     @map("available_date")
+  feesJson          Json          @default("{}") @map("fees_json")
+  amenitiesJson     Json          @default("[]") @map("amenities_json")
+  petPolicyJson     Json          @default("{}") @map("pet_policy_json")
+  mediaJson         Json          @default("{}") @map("media_json")
+  rawPayloadJson    Json?         @map("raw_payload_json")
+  listedAt          DateTime?     @map("listed_at")
+  lastSeenAt        DateTime      @map("last_seen_at")
+  lastRefreshedAt   DateTime      @map("last_refreshed_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  versions       ListingVersion[]
+  scores         ListingScore[]
+  embeddings     ListingEmbedding[]
+  savedListings  SavedListing[]
+  listingContacts ListingContact[]
+  conversations  Conversation[]
+  tours          Tour[]
+  packets        ApplicationPacket[]
+  complianceFlags ComplianceFlag[]
+
+  @@index([source, sourceListingId])
+  @@index([canonicalHash])
+  @@index([city, state, price])
+  @@map("listings")
+}
+
+model ListingEmbedding {
+  id             String                  @id @default(cuid())
+  listingId      String                  @map("listing_id")
+  embedding      Unsupported("vector")?  @map("embedding")
+  searchableText String                  @map("searchable_text")
+  metadataJson   Json                    @default("{}") @map("metadata_json")
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId])
+  @@map("listing_embeddings")
+}
+
+model ListingVersion {
+  id               String        @id @default(cuid())
+  listingId        String        @map("listing_id")
+  observedAt       DateTime      @map("observed_at")
+  status           ListingStatus
+  price            Int
+  feesJson         Json          @default("{}") @map("fees_json")
+  availabilityDate DateTime?     @map("availability_date")
+  payloadHash      String        @map("payload_hash")
+  diffJson         Json          @default("{}") @map("diff_json")
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, observedAt])
+  @@map("listing_versions")
+}
+
+model Building {
+  id                String   @id @default(cuid())
+  addressNormalized String   @map("address_normalized")
+  city              String
+  state             String
+  zip               String?
+  lat               Float?
+  lng               Float?
+  publicDataJson    Json     @default("{}") @map("public_data_json")
+  riskSignalsJson   Json     @default("{}") @map("risk_signals_json")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([addressNormalized, city, state])
+  @@map("buildings")
+}
+
+model ListingScore {
+  id              String   @id @default(cuid())
+  listingId       String   @map("listing_id")
+  searchSessionId String   @map("search_session_id")
+  totalScore      Float    @map("total_score")
+  rank            Int
+  recommendation  String
+  dimensionsJson  Json     @default("{}") @map("dimensions_json")
+  reasonsJson     Json     @default("{}") @map("reasons_json")
+  computedAt      DateTime @map("computed_at")
+
+  listing       Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  searchSession SearchSession @relation(fields: [searchSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([listingId, searchSessionId])
+  @@index([searchSessionId, rank])
+  @@map("listing_scores")
+}
+
+model SavedListing {
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  searchSessionId String?  @map("search_session_id")
+  listingId       String   @map("listing_id")
+  status          String
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  searchSession SearchSession? @relation(fields: [searchSessionId], references: [id])
+  listing       Listing        @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, listingId])
+  @@map("saved_listings")
+}
+
+model Contact {
+  id          String   @id @default(cuid())
+  name        String?
+  company     String?
+  role        String?
+  email       String?
+  phone       String?
+  source      String?
+  confidence  String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  listingContacts ListingContact[]
+  conversations   Conversation[]
+
+  @@index([email])
+  @@index([phone])
+  @@map("contacts")
+}
+
+model ListingContact {
+  listingId    String @map("listing_id")
+  contactId    String @map("contact_id")
+  relationship String
+  confidence   String
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@id([listingId, contactId])
+  @@map("listing_contacts")
+}
+
+model Conversation {
+  id             String         @id @default(cuid())
+  userId         String         @map("user_id")
+  listingId      String         @map("listing_id")
+  contactId      String         @map("contact_id")
+  channel        MessageChannel
+  status         String
+  lastMessageAt  DateTime?      @map("last_message_at")
+  nextFollowUpAt DateTime?      @map("next_follow_up_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing  Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  contact  Contact   @relation(fields: [contactId], references: [id])
+  messages Message[]
+  drafts   MessageDraft[]
+  tours    Tour[]
+  complianceFlags ComplianceFlag[]
+
+  @@index([userId, status])
+  @@map("conversations")
+}
+
+model Message {
+  id                String           @id @default(cuid())
+  conversationId    String           @map("conversation_id")
+  direction         MessageDirection
+  channel           MessageChannel
+  fromValue         String           @map("from_value")
+  toValue           String           @map("to_value")
+  subject           String?
+  body              String
+  normalizedBody    String           @map("normalized_body")
+  provider          String?
+  providerMessageId String?          @map("provider_message_id")
+  intent            String?
+  extractedJson     Json             @default("{}") @map("extracted_json")
+  sentAt            DateTime?        @map("sent_at")
+  receivedAt        DateTime?        @map("received_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  events       OutboundMessageEvent[]
+
+  @@unique([provider, providerMessageId])
+  @@map("messages")
+}
+
+model MessageDraft {
+  id               String   @id @default(cuid())
+  conversationId   String?  @map("conversation_id")
+  listingId        String   @map("listing_id")
+  body             String
+  subject          String?
+  status           String
+  riskScore        Float    @map("risk_score")
+  agentRunId       String?  @map("agent_run_id")
+  approvalId       String?  @map("approval_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+  approval     Approval?     @relation(fields: [approvalId], references: [id])
+
+  @@map("message_drafts")
+}
+
+model OutboundMessageEvent {
+  id         String   @id @default(cuid())
+  messageId  String   @map("message_id")
+  provider   String
+  eventType  String   @map("event_type")
+  payload    Json
+  occurredAt DateTime @map("occurred_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("outbound_message_events")
+}
+
+model Tour {
+  id              String     @id @default(cuid())
+  userId          String     @map("user_id")
+  listingId       String     @map("listing_id")
+  conversationId  String?    @map("conversation_id")
+  status          TourStatus
+  proposedSlotsJson Json     @default("[]") @map("proposed_slots_json")
+  selectedSlotJson  Json?    @map("selected_slot_json")
+  calendarEventId String?    @map("calendar_event_id")
+  location        String?
+  instructions    String?
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing      Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@map("tours")
+}
+
+model ApplicationDocument {
+  id                    String   @id @default(cuid())
+  userId                String   @map("user_id")
+  type                  String
+  fileName              String   @map("file_name")
+  mimeType              String   @map("mime_type")
+  storageKey            String   @map("storage_key")
+  sizeBytes             Int      @map("size_bytes")
+  status                String
+  extractedFieldsJson   Json?    @map("extracted_fields_json")
+  containsSensitiveData Boolean  @map("contains_sensitive_data")
+  expiresAt             DateTime? @map("expires_at")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("application_documents")
+}
+
+model ApplicationPacket {
+  id                    String   @id @default(cuid())
+  userId                String   @map("user_id")
+  listingId             String   @map("listing_id")
+  status                String
+  renterSummary         String   @map("renter_summary")
+  coverMessage          String   @map("cover_message")
+  includedDocumentIdsJson Json   @default("[]") @map("included_document_ids_json")
+  secureShareUrl        String?  @map("secure_share_url")
+  expiresAt             DateTime? @map("expires_at")
+  agentRunId            String?  @map("agent_run_id")
+  approvedAt            DateTime? @map("approved_at")
+  sentAt                DateTime? @map("sent_at")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@map("application_packets")
+}
+
+model Approval {
+  id         String         @id @default(cuid())
+  userId     String         @map("user_id")
+  type       String
+  status     ApprovalStatus @default(PENDING)
+  title      String
+  body       String
+  payloadJson Json          @map("payload_json")
+  riskScore  Float          @map("risk_score")
+  expiresAt  DateTime?      @map("expires_at")
+  approvedAt DateTime?      @map("approved_at")
+  rejectedAt DateTime?      @map("rejected_at")
+  createdAt  DateTime       @default(now()) @map("created_at")
+  updatedAt  DateTime       @updatedAt @map("updated_at")
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  drafts MessageDraft[]
+
+  @@index([userId, status])
+  @@map("approvals")
+}
+
+model AgentRun {
+  id              String         @id @default(cuid())
+  workflowId      String?        @map("workflow_id")
+  agentName       String         @map("agent_name")
+  userId          String?        @map("user_id")
+  searchSessionId String?        @map("search_session_id")
+  listingId       String?        @map("listing_id")
+  status          AgentRunStatus
+  inputJson       Json           @map("input_json")
+  outputJson      Json?          @map("output_json")
+  model           String
+  promptVersion   String         @map("prompt_version")
+  error           String?
+  startedAt       DateTime       @map("started_at")
+  completedAt     DateTime?      @map("completed_at")
+
+  searchSession SearchSession? @relation(fields: [searchSessionId], references: [id])
+  toolCalls     ToolCall[]
+
+  @@index([agentName, status])
+  @@map("agent_runs")
+}
+
+model ToolCall {
+  id             String         @id @default(cuid())
+  agentRunId     String         @map("agent_run_id")
+  toolName       String         @map("tool_name")
+  inputJson      Json           @map("input_json")
+  outputJson     Json?          @map("output_json")
+  status         ToolCallStatus
+  riskScore      Float          @map("risk_score")
+  approvalId     String?        @map("approval_id")
+  idempotencyKey String         @unique @map("idempotency_key")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  executedAt     DateTime?      @map("executed_at")
+
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  @@index([toolName, status])
+  @@map("tool_calls")
+}
+
+model WorkflowRun {
+  id                 String    @id @default(cuid())
+  temporalWorkflowId String    @unique @map("temporal_workflow_id")
+  workflowType       String    @map("workflow_type")
+  entityType         String    @map("entity_type")
+  entityId           String    @map("entity_id")
+  status             String
+  startedAt          DateTime  @map("started_at")
+  completedAt        DateTime? @map("completed_at")
+  lastError          String?   @map("last_error")
+
+  @@map("workflow_runs")
+}
+
+model ComplianceFlag {
+  id             String   @id @default(cuid())
+  userId         String?  @map("user_id")
+  listingId      String?  @map("listing_id")
+  conversationId String?  @map("conversation_id")
+  flagType       String   @map("flag_type")
+  severity       String
+  status         String
+  detailsJson    Json     @default("{}") @map("details_json")
+  createdAt      DateTime @default(now()) @map("created_at")
+  resolvedAt     DateTime? @map("resolved_at")
+
+  listing      Listing?      @relation(fields: [listingId], references: [id])
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([status, severity])
+  @@map("compliance_flags")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorType  String   @map("actor_type")
+  actorId    String?  @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  metadataJson Json   @default("{}") @map("metadata_json")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation("ActorAuditLogs", fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorType, actorId])
+  @@map("audit_logs")
+}

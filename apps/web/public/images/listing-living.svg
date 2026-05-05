@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img" aria-label="Apartment living room">
+  <rect width="640" height="420" fill="#e9ece8"/>
+  <rect x="44" y="48" width="552" height="290" rx="8" fill="#fbfaf7" stroke="#cfd4cf"/>
+  <rect x="84" y="82" width="180" height="120" fill="#b8c3bb"/>
+  <rect x="294" y="76" width="220" height="150" fill="#f4f0e8" stroke="#d1cbc1"/>
+  <rect x="92" y="255" width="276" height="72" rx="8" fill="#2d2d2d"/>
+  <rect x="112" y="230" width="80" height="42" rx="6" fill="#76746c"/>
+  <rect x="214" y="230" width="80" height="42" rx="6" fill="#76746c"/>
+  <rect x="398" y="270" width="94" height="16" fill="#a68254"/>
+  <rect x="430" y="206" width="30" height="64" fill="#77624c"/>
+  <circle cx="452" cy="184" r="28" fill="#8d9b82"/>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img" aria-label="Apartment kitchen">
+  <rect width="640" height="420" fill="#ece7df"/>
+  <rect x="42" y="70" width="556" height="265" rx="8" fill="#f8f6f2" stroke="#d1cbc1"/>
+  <rect x="72" y="98" width="210" height="160" fill="#d7d0c5"/>
+  <rect x="302" y="98" width="250" height="70" fill="#ffffff" stroke="#d1cbc1"/>
+  <rect x="302" y="186" width="250" height="72" fill="#ffffff" stroke="#d1cbc1"/>
+  <rect x="86" y="278" width="468" height="32" fill="#262626"/>
+  <rect x="96" y="310" width="92" height="60" fill="#ffffff" stroke="#d1cbc1"/>
+  <rect x="208" y="310" width="120" height="60" fill="#ffffff" stroke="#d1cbc1"/>
+  <rect x="348" y="310" width="96" height="60" fill="#ffffff" stroke="#d1cbc1"/>
+  <rect x="464" y="310" width="72" height="60" fill="#ffffff" stroke="#d1cbc1"/>
+  <circle cx="396" cy="292" r="10" fill="#d6a14a"/>
+</svg>

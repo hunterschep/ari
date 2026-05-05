@@ -1,0 +1,19 @@
+{
+  "name": "@ari/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@ari/agents": "0.1.0",
+    "@ari/integrations": "0.1.0",
+    "@ari/schemas": "0.1.0",
+    "@ari/shared": "0.1.0",
+    "@temporalio/client": "^1.17.0",
+    "@temporalio/worker": "^1.17.0",
+    "@temporalio/workflow": "^1.17.0"
+  }
+}
