@@ -24,12 +24,6 @@ export async function registerAdminRoutes(app: FastifyInstance, store: AriStore)
   app.post("/v1/admin/workflows/:id/retry", async (request) => ({ ok: true, workflowId: (request.params as { id: string }).id, status: "RETRIED" }));
   app.get("/v1/admin/compliance-flags", async () => store.complianceFlags);
   app.post("/v1/admin/compliance-flags/:id/resolve", async (request) => store.resolveComplianceFlag((request.params as { id: string }).id));
-  app.get("/v1/admin/integrations", async () => ({
-    rentcast: "mock",
-    email: "mock-sendgrid",
-    sms: "mock-twilio",
-    calendar: "mock-google-calendar",
-    objectStorage: "mock-s3"
-  }));
+  app.get("/v1/admin/integrations", async () => store.listIntegrations());
   app.get("/v1/admin/audit-logs", async () => store.auditLogs);
 }

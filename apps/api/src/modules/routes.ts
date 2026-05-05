@@ -5,6 +5,7 @@ import { registerApprovalRoutes } from "./approvals/approval.routes";
 import { registerAuthRoutes } from "./auth/auth.routes";
 import { registerCalendarRoutes } from "./calendar/calendar.routes";
 import { registerDocumentRoutes } from "./documents/document.routes";
+import { registerEnterpriseRoutes } from "./enterprise/enterprise.routes";
 import { registerListingRoutes } from "./listings/listing.routes";
 import { registerMessagingRoutes } from "./messaging/messaging.routes";
 import { registerRenterProfileRoutes } from "./renter-profile/renter-profile.routes";
@@ -24,5 +25,6 @@ export async function registerRoutes(app: FastifyInstance, store: AriStore) {
   await registerCalendarRoutes(app, store);
   await registerDocumentRoutes(app, store);
   await registerApprovalRoutes(app, store);
+  await registerEnterpriseRoutes(app, store);
   await registerAdminRoutes(app, store);
 }

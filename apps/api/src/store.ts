@@ -20,23 +20,37 @@ import type {
   ApplicationDocument,
   ApplicationPacket,
   Approval,
+  AccountSettings,
   AuditLog,
   AutomationPolicy,
   CanonicalListing,
   ComplianceFlag,
   Conversation,
+  IntegrationConnection,
+  IntegrationProvider,
+  InquiryPipelineRow,
+  ListingPipelineItem,
+  ListingPipelineStatus,
   ListingScore,
+  ListingTask,
+  MapSearchResponse,
   ListingVersion,
   Message,
   MessageDraft,
+  NotificationEvent,
+  PipelineAction,
+  ProviderEvent,
   RenterProfile,
   SearchCriteria,
   SearchSession,
+  SourceIngestion,
   Tour,
   ToolCall,
-  UserConsent
+  UserConsent,
+  WebhookEvent
 } from "@ari/schemas";
 import {
+  MapboxProvider,
   MockCalendarProvider,
   MockEmailProvider,
   MockObjectStorageProvider,
@@ -64,6 +78,7 @@ export function createAriStore() {
   const calendarProvider = new MockCalendarProvider();
   const storageProvider = new MockObjectStorageProvider();
   const rentcast = new RentcastClient();
+  const mapbox = new MapboxProvider();
 
   const user: AriUser = {
     id: "user-demo",
@@ -261,6 +276,248 @@ export function createAriStore() {
       expiresAt: addDaysIso(30)
     }
   ];
+  const accountSettings: AccountSettings = {
+    id: "account-demo",
+    userId: user.id,
+    authProvider: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || process.env.CLERK_SECRET_KEY ? "CLERK" : "LOCAL_DEMO",
+    clerkUserId: process.env.CLERK_DEMO_USER_ID,
+    legalName: profile.legalName,
+    email: user.email,
+    phone: user.phone,
+    timezone: "America/New_York",
+    notificationPreferences: {
+      email: true,
+      sms: false,
+      push: false,
+      quietHoursStart: "21:00",
+      quietHoursEnd: "08:00"
+    },
+    security: {
+      mfaEnabled: Boolean(process.env.CLERK_SECRET_KEY),
+      sessions: authSessions.length,
+      lastLoginAt: nowIso()
+    },
+    dataControls: {
+      allowTraining: false,
+      retainApplicationDocs: true,
+      redactFinancialsByDefault: true
+    },
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  const integrationConnections: IntegrationConnection[] = [
+    createIntegrationConnection("CLERK", "Account signup and identity", "CLERK_SECRET_KEY", ["email", "profile", "session"]),
+    createIntegrationConnection("RENTCAST", "Rental listing source", "RENTCAST_API_KEY", ["rental_search"]),
+    createIntegrationConnection("MAPBOX", "Map search and commute estimates", "MAPBOX_ACCESS_TOKEN", ["geocoding", "matrix", "static_maps"]),
+    createIntegrationConnection("SENDGRID", "Email outreach", "SENDGRID_API_KEY", ["mail.send"]),
+    createIntegrationConnection("TWILIO", "SMS fallback", "TWILIO_AUTH_TOKEN", ["messages.write"]),
+    createIntegrationConnection("GOOGLE_CALENDAR", "Tour scheduling", "GOOGLE_CALENDAR_CLIENT_ID", ["calendar.read", "calendar.events.write"]),
+    createIntegrationConnection("S3", "Application document vault", "S3_BUCKET", ["object.write", "object.read"]),
+    createIntegrationConnection("OPENAI", "Agent reasoning", "OPENAI_API_KEY", ["responses"]),
+    createIntegrationConnection("TEMPORAL", "Durable workflow engine", "TEMPORAL_ADDRESS", ["workflow.start", "workflow.signal"]),
+    createIntegrationConnection("POSTGRES", "System of record", "DATABASE_URL", ["read", "write"])
+  ];
+  const sourceIngestions: SourceIngestion[] = [
+    {
+      id: "ingestion-rentcast-demo",
+      provider: "RENTCAST",
+      status: "SUCCEEDED",
+      mode: process.env.RENTCAST_API_KEY ? "PRODUCTION" : "MOCK",
+      searchSessionId: sessions[0]!.id,
+      startedAt: nowIso(),
+      completedAt: nowIso(),
+      rowsSeen: rentcastFixtureListings.length,
+      rowsImported: listings.length,
+      rowsRejected: 0,
+      errors: []
+    }
+  ];
+  const providerEvents: ProviderEvent[] = [];
+  const webhookEvents: WebhookEvent[] = [];
+  const notificationEvents: NotificationEvent[] = [];
+  const pipelineItems: ListingPipelineItem[] = scores.map((score) => {
+    const listing = listings.find((candidate) => candidate.id === score.listingId)!;
+    return createPipelineItem(score, listing, sessions[0]!.id);
+  });
+  const tasks: ListingTask[] = [
+    {
+      id: "task-profile-gap",
+      userId: user.id,
+      type: "PROFILE_GAP",
+      status: profile.applicationReadiness === "READY" ? "DONE" : "OPEN",
+      priority: "HIGH",
+      title: "Complete application packet readiness",
+      body: "Add remaining ID and income verification before Ari can safely submit packets.",
+      riskScore: 35,
+      createdBy: "SYSTEM",
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    },
+    {
+      id: "task-connect-clerk",
+      userId: user.id,
+      type: "CONNECT_INTEGRATION",
+      status: process.env.CLERK_SECRET_KEY ? "DONE" : "OPEN",
+      priority: "HIGH",
+      title: "Connect Clerk for production accounts",
+      body: "Configure Clerk keys and webhook verification before enabling public signup.",
+      riskScore: 60,
+      createdBy: "OPS",
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    },
+    ...pipelineItems
+      .filter((item) => item.status === "NEW_MATCH" || item.status === "APPROVAL_PENDING")
+      .slice(0, 3)
+      .map<ListingTask>((item, index) => ({
+        id: `task-outreach-${item.listingId}`,
+        userId: user.id,
+        listingId: item.listingId,
+        type: item.status === "APPROVAL_PENDING" ? "APPROVE_OUTREACH" : "FOLLOW_UP",
+        status: "OPEN",
+        priority: index === 0 ? "URGENT" : item.priority,
+        dueAt: addDaysIso(index + 1),
+        title: item.status === "APPROVAL_PENDING" ? "Approve drafted outreach" : "Review high-fit match",
+        body: item.nextAction,
+        riskScore: item.riskFlags.length ? 72 : 24,
+        createdBy: "AGENT",
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      }))
+  ];
+
+  function createIntegrationConnection(
+    provider: IntegrationProvider,
+    label: string,
+    requiredEnv: string,
+    scopes: string[] = []
+  ): IntegrationConnection {
+    const configured = Boolean(process.env[requiredEnv]);
+    return {
+      id: `integration-${provider.toLowerCase().replaceAll("_", "-")}`,
+      userId: ["CLERK", "GOOGLE_CALENDAR"].includes(provider) ? user.id : undefined,
+      provider,
+      status: configured ? "CONNECTED" : "NEEDS_CONFIG",
+      mode: configured ? "PRODUCTION" : "MOCK",
+      label,
+      scopes,
+      lastCheckedAt: nowIso(),
+      lastSyncedAt: configured ? nowIso() : undefined,
+      configRequired: configured ? [] : [requiredEnv],
+      health: configured ? { latencyMs: 90 + scopes.length * 12, errorRate: 0 } : { lastError: `Missing ${requiredEnv}` }
+    };
+  }
+
+  function priorityForScore(score: ListingScore): ListingTask["priority"] {
+    if (score.totalScore >= 88) return "URGENT";
+    if (score.totalScore >= 78) return "HIGH";
+    if (score.totalScore >= 60) return "MEDIUM";
+    return "LOW";
+  }
+
+  function priorityRank(priority: ListingTask["priority"]) {
+    return { LOW: 1, MEDIUM: 2, HIGH: 3, URGENT: 4 }[priority];
+  }
+
+  function statusForScore(score: ListingScore, listing: CanonicalListing): ListingPipelineStatus {
+    if (listing.status === "STALE") return "STALE";
+    if (score.recommendation === "SKIP") return "SKIPPED";
+    if (score.recommendation === "CONTACT_NOW") return "NEW_MATCH";
+    if (score.recommendation === "NEEDS_USER_REVIEW") return "PAUSED";
+    return "NEW_MATCH";
+  }
+
+  function createPipelineItem(score: ListingScore, listing: CanonicalListing, searchSessionId: string): ListingPipelineItem {
+    const feeFlags = evaluateFeeRules(listing);
+    const status = statusForScore(score, listing);
+    return {
+      id: stableHash(["pipeline", user.id, searchSessionId, listing.id].join(":")).slice(0, 18),
+      userId: user.id,
+      searchSessionId,
+      listingId: listing.id,
+      status,
+      priority: priorityForScore(score),
+      score: score.totalScore,
+      recommendation: score.recommendation,
+      owner: status === "PAUSED" ? "USER" : "ARI",
+      nextAction:
+        status === "PAUSED"
+          ? "Resolve listing uncertainty before Ari contacts the agent."
+          : status === "SKIPPED"
+            ? "Skipped by hard criteria."
+            : score.recommendation === "CONTACT_NOW"
+              ? "Draft first outreach and ask availability, fees, and tour windows."
+              : "Keep warm while higher-fit units are contacted.",
+      riskFlags: feeFlags.map((flag) => flag.code),
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+  }
+
+  function getPipelineItemOrThrow(id: string) {
+    const item = pipelineItems.find((candidate) => candidate.id === id || candidate.listingId === id);
+    if (!item) throw new Error(`Pipeline item not found: ${id}`);
+    return item;
+  }
+
+  function syncPipelineForListing(listingId: string, patch: Partial<ListingPipelineItem>) {
+    const item = pipelineItems.find((candidate) => candidate.listingId === listingId);
+    if (!item) return undefined;
+    Object.assign(item, patch, { updatedAt: nowIso() });
+    return item;
+  }
+
+  function upsertTask(input: Omit<ListingTask, "id" | "createdAt" | "updatedAt" | "status"> & { id?: string; status?: ListingTask["status"] }) {
+    const id = input.id ?? stableHash(["task", input.userId, input.type, input.listingId, input.conversationId, tasks.length].join(":")).slice(0, 18);
+    const existing = tasks.find((candidate) => candidate.id === id);
+    if (existing) {
+      Object.assign(existing, input, { updatedAt: nowIso() });
+      return existing;
+    }
+    const task: ListingTask = {
+      ...input,
+      id,
+      status: input.status ?? "OPEN",
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    tasks.push(task);
+    return task;
+  }
+
+  function completeTasks(predicate: (task: ListingTask) => boolean) {
+    for (const task of tasks.filter(predicate)) {
+      if (task.status === "OPEN" || task.status === "IN_PROGRESS" || task.status === "WAITING") {
+        task.status = "DONE";
+        task.updatedAt = nowIso();
+      }
+    }
+  }
+
+  function recordProviderEvent(provider: ProviderEvent["provider"], eventType: string, entityType?: string, entityId?: string, payload: Record<string, unknown> = {}) {
+    const event: ProviderEvent = {
+      id: stableHash(["provider-event", provider, eventType, entityType, entityId, providerEvents.length].join(":")).slice(0, 18),
+      provider,
+      eventType,
+      status: "PROCESSED",
+      entityType,
+      entityId,
+      payload,
+      receivedAt: nowIso(),
+      processedAt: nowIso()
+    };
+    providerEvents.push(event);
+    return event;
+  }
+
+  function stableListingCoordinate(listing: CanonicalListing) {
+    if (listing.address.lat && listing.address.lng) return { lat: listing.address.lat, lng: listing.address.lng };
+    const hash = parseInt(stableHash(listing.address.raw).slice(0, 8), 16);
+    return {
+      lat: 40.675 + (hash % 1050) / 10000,
+      lng: -74.02 + ((hash >> 4) % 950) / 10000
+    };
+  }
 
   function audit(action: string, entityType: string, entityId?: string, metadata: Record<string, unknown> = {}) {
     auditLogs.push({
@@ -338,6 +595,14 @@ export function createAriStore() {
     auditLogs,
     workflowRuns,
     authSessions,
+    accountSettings,
+    integrationConnections,
+    sourceIngestions,
+    providerEvents,
+    webhookEvents,
+    notificationEvents,
+    pipelineItems,
+    tasks,
 
     getMe() {
       return user;
@@ -498,6 +763,33 @@ export function createAriStore() {
       }
       const ranked = rankListings(listings, session.criteria, session.id);
       scores.splice(0, scores.length, ...ranked);
+      for (const score of ranked) {
+        const listing = getListingOrThrow(score.listingId);
+        const existing = pipelineItems.find((item) => item.searchSessionId === session.id && item.listingId === score.listingId);
+        if (existing) {
+          existing.score = score.totalScore;
+          existing.priority = priorityForScore(score);
+          existing.recommendation = score.recommendation;
+          existing.riskFlags = evaluateFeeRules(listing).map((flag) => flag.code);
+          existing.updatedAt = nowIso();
+        } else {
+          pipelineItems.push(createPipelineItem(score, listing, session.id));
+        }
+      }
+      sourceIngestions.push({
+        id: stableHash(["ingestion", "rentcast", session.id, sourceIngestions.length].join(":")).slice(0, 18),
+        provider: "RENTCAST",
+        status: "SUCCEEDED",
+        mode: process.env.RENTCAST_API_KEY ? "PRODUCTION" : "MOCK",
+        searchSessionId: session.id,
+        startedAt: nowIso(),
+        completedAt: nowIso(),
+        rowsSeen: normalized.length,
+        rowsImported: normalized.length,
+        rowsRejected: 0,
+        errors: []
+      });
+      recordProviderEvent("RENTCAST", "listing_refresh", "search_session", id, { imported: normalized.length, ranked: ranked.length });
       audit(AUDIT_EVENTS.LISTING_IMPORTED, "search_session", id, { imported: normalized.length });
       return { imported: normalized.length, ranked: ranked.length };
     },
@@ -513,6 +805,188 @@ export function createAriStore() {
           feeFlags: evaluateFeeRules(listing)
         };
       });
+    },
+
+    getDashboard() {
+      const openTasks = tasks.filter((task) => task.status === "OPEN" || task.status === "IN_PROGRESS");
+      const activePipeline = pipelineItems.filter((item) => !["SKIPPED", "STALE"].includes(item.status));
+      return {
+        user,
+        profile,
+        accountSettings,
+        activeSearch: sessions.find((session) => session.status === "ACTIVE") ?? sessions[0],
+        summary: {
+          pipelineItems: activePipeline.length,
+          newMatches: pipelineItems.filter((item) => item.status === "NEW_MATCH").length,
+          awaitingReply: pipelineItems.filter((item) => item.status === "AWAITING_REPLY").length,
+          needsUser: pipelineItems.filter((item) => item.owner === "USER" && !["SKIPPED", "STALE"].includes(item.status)).length,
+          openTasks: openTasks.length,
+          pendingApprovals: approvals.filter((approval) => approval.status === "PENDING").length,
+          tours: tours.filter((tour) => !["CANCELLED", "COMPLETED", "NO_SHOW"].includes(tour.status)).length,
+          applicationReady: documents.filter((document) => document.status === "APPROVED").length
+        },
+        pipeline: this.listPipeline({ limit: 8 }),
+        tasks: openTasks.sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority)).slice(0, 10),
+        approvals: approvals.filter((approval) => approval.status === "PENDING"),
+        tours,
+        conversations: this.listConversations(),
+        documents,
+        integrationConnections,
+        sourceIngestions: sourceIngestions.slice(-5),
+        workflowRuns,
+        providerEvents: providerEvents.slice(-10),
+        complianceFlags: complianceFlags.filter((flag) => flag.status === "OPEN")
+      };
+    },
+
+    listPipeline(filters: { searchSessionId?: string; status?: ListingPipelineStatus; limit?: number } = {}): InquiryPipelineRow[] {
+      const rows = pipelineItems
+        .filter((item) => !filters.searchSessionId || item.searchSessionId === filters.searchSessionId)
+        .filter((item) => !filters.status || item.status === filters.status)
+        .sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority) || b.score - a.score)
+        .map((pipeline) => {
+          const conversation = conversations.find((candidate) => candidate.listingId === pipeline.listingId);
+          return {
+            pipeline,
+            listing: getListingOrThrow(pipeline.listingId),
+            score: scores.find((score) => score.listingId === pipeline.listingId && score.searchSessionId === pipeline.searchSessionId),
+            conversationId: conversation?.id,
+            lastMessageAt: conversation?.lastMessageAt
+          };
+        });
+      return typeof filters.limit === "number" ? rows.slice(0, filters.limit) : rows;
+    },
+
+    getPipelineItem(id: string) {
+      const pipeline = getPipelineItemOrThrow(id);
+      const listing = getListingOrThrow(pipeline.listingId);
+      return {
+        pipeline,
+        listing,
+        score: scores.find((score) => score.listingId === listing.id && score.searchSessionId === pipeline.searchSessionId),
+        conversation: conversations.find((conversation) => conversation.listingId === listing.id),
+        tasks: tasks.filter((task) => task.listingId === listing.id),
+        approvals: approvals.filter((approval) => JSON.stringify(approval.payload).includes(listing.id))
+      };
+    },
+
+    async performPipelineAction(id: string, action: PipelineAction, payload: Record<string, unknown> = {}) {
+      const item = getPipelineItemOrThrow(id);
+      switch (action) {
+        case "DRAFT_OUTREACH": {
+          const draft = this.createMessageDraft(item.listingId);
+          return { pipeline: getPipelineItemOrThrow(item.id), draft };
+        }
+        case "APPROVE_SEND": {
+          let draft = drafts.find((candidate) => candidate.listingId === item.listingId && candidate.status !== "SENT");
+          if (!draft) draft = this.createMessageDraft(item.listingId);
+          this.approveDraft(draft.id);
+          const message = await this.sendDraft(draft.id);
+          return { pipeline: getPipelineItemOrThrow(item.id), message };
+        }
+        case "MARK_SKIPPED":
+          Object.assign(item, {
+            status: "SKIPPED",
+            owner: "USER",
+            nextAction: String(payload.reason ?? "Skipped by user."),
+            updatedAt: nowIso()
+          });
+          return { pipeline: item };
+        case "PAUSE_AUTOMATION":
+          Object.assign(item, {
+            status: "PAUSED",
+            owner: "USER",
+            nextAction: String(payload.reason ?? "Automation paused for manual review."),
+            updatedAt: nowIso()
+          });
+          return { pipeline: item };
+        case "REQUEST_TOUR":
+          Object.assign(item, {
+            status: "TOUR_PROPOSED",
+            owner: "USER",
+            nextAction: "Confirm preferred tour slots with the agent.",
+            updatedAt: nowIso()
+          });
+          upsertTask({
+            id: `task-tour-request-${item.listingId}`,
+            userId: user.id,
+            listingId: item.listingId,
+            type: "SELECT_TOUR_SLOT",
+            priority: "HIGH",
+            dueAt: addDaysIso(1),
+            title: "Confirm preferred tour slots",
+            body: "Ari is ready to request a tour once slots are approved.",
+            riskScore: 44,
+            createdBy: "AGENT"
+          });
+          return { pipeline: item };
+        case "PREPARE_PACKET": {
+          const packet = this.generatePacket(item.listingId, Array.isArray(payload.requestedDocuments) ? payload.requestedDocuments.map(String) : []);
+          return { pipeline: getPipelineItemOrThrow(item.id), packet };
+        }
+        case "SCHEDULE_FOLLOW_UP":
+          Object.assign(item, {
+            nextFollowUpAt: typeof payload.dueAt === "string" ? payload.dueAt : addDaysIso(2),
+            nextAction: "Follow up if the agent has not replied.",
+            updatedAt: nowIso()
+          });
+          return { pipeline: item };
+        case "MARK_STALE":
+          Object.assign(item, {
+            status: "STALE",
+            owner: "ARI",
+            nextAction: "Refresh source data before taking more action.",
+            updatedAt: nowIso()
+          });
+          return { pipeline: item };
+        default:
+          throw new Error(`Unsupported pipeline action: ${action}`);
+      }
+    },
+
+    async getSearchMap(id: string): Promise<MapSearchResponse> {
+      const rows = this.listPipeline({ searchSessionId: id });
+      const features = await Promise.all(
+        rows.map(async ({ pipeline, listing, score }) => {
+          const coordinate = listing.address.lat && listing.address.lng ? { lat: listing.address.lat, lng: listing.address.lng } : stableListingCoordinate(listing);
+          const commute = profile.commuteAnchors[0]
+            ? (await mapbox.computeRouteMatrix({ origins: [listing.address.raw], destinations: [profile.commuteAnchors[0].address] })).rows[0]?.durationMinutes
+            : undefined;
+          return {
+            id: `map-${listing.id}`,
+            listingId: listing.id,
+            lat: coordinate.lat,
+            lng: coordinate.lng,
+            status: pipeline.status,
+            score: score?.totalScore ?? pipeline.score,
+            price: listing.price,
+            title: listing.title ?? listing.address.raw,
+            neighborhood: listing.address.city,
+            warningCount: evaluateFeeRules(listing).length + computePricingAdvice(listing, listings).warnings.length,
+            commuteMinutes: commute
+          };
+        })
+      );
+      const lats = features.map((feature) => feature.lat);
+      const lngs = features.map((feature) => feature.lng);
+      return {
+        searchSessionId: id,
+        center: {
+          lat: Number(((Math.min(...lats) + Math.max(...lats)) / 2 || 40.72).toFixed(5)),
+          lng: Number(((Math.min(...lngs) + Math.max(...lngs)) / 2 || -73.96).toFixed(5))
+        },
+        bounds: {
+          north: Math.max(...lats, 40.78),
+          south: Math.min(...lats, 40.65),
+          east: Math.max(...lngs, -73.88),
+          west: Math.min(...lngs, -74.04)
+        },
+        features
+      };
+    },
+
+    getInquiries(searchSessionId: string) {
+      return this.listPipeline({ searchSessionId });
     },
 
     getListing(id: string) {
@@ -554,6 +1028,10 @@ export function createAriStore() {
       listings.push(listing);
       const version = createListingVersion(listing);
       if (version) listingVersions.push(version);
+      const ranked = rankListings(listings, sessions[0]!.criteria, sessions[0]!.id);
+      scores.splice(0, scores.length, ...ranked);
+      const score = ranked.find((candidate) => candidate.listingId === listing.id);
+      if (score) pipelineItems.push(createPipelineItem(score, listing, sessions[0]!.id));
       audit(AUDIT_EVENTS.LISTING_IMPORTED, "listing", listing.id, { sourceUrl });
       return listing;
     },
@@ -576,6 +1054,10 @@ export function createAriStore() {
         "INTERNAL_MANUAL"
       );
       listings.push(listing);
+      const ranked = rankListings(listings, sessions[0]!.criteria, sessions[0]!.id);
+      scores.splice(0, scores.length, ...ranked);
+      const score = ranked.find((candidate) => candidate.listingId === listing.id);
+      if (score) pipelineItems.push(createPipelineItem(score, listing, sessions[0]!.id));
       return listing;
     },
 
@@ -599,6 +1081,24 @@ export function createAriStore() {
       });
       draft.approvalId = approval.id;
       drafts.push(draft);
+      syncPipelineForListing(listingId, {
+        status: "APPROVAL_PENDING",
+        owner: "USER",
+        nextAction: "Review and approve Ari's first outreach before it is sent."
+      });
+      upsertTask({
+        id: `task-approve-${draft.id}`,
+        userId: user.id,
+        listingId,
+        conversationId: conversation.id,
+        approvalId: approval.id,
+        type: "APPROVE_OUTREACH",
+        priority: draft.riskScore >= 70 ? "URGENT" : "HIGH",
+        title: `Approve outreach for ${listing.title ?? listing.address.raw}`,
+        body: draft.body,
+        riskScore: draft.riskScore,
+        createdBy: "AGENT"
+      });
       audit(AUDIT_EVENTS.MESSAGE_DRAFT_CREATED, "message_draft", draft.id, { listingId });
       return draft;
     },
@@ -625,6 +1125,12 @@ export function createAriStore() {
         approval.approvedAt = nowIso();
         approval.updatedAt = nowIso();
       }
+      completeTasks((task) => task.approvalId === draft.approvalId || task.id === `task-approve-${draft.id}`);
+      syncPipelineForListing(draft.listingId, {
+        status: "DRAFTED",
+        owner: "ARI",
+        nextAction: "Approved outreach is ready to send."
+      });
       return draft;
     },
 
@@ -666,6 +1172,30 @@ export function createAriStore() {
       conversation.status = "AWAITING_LANDLORD";
       conversation.lastMessageAt = message.createdAt;
       conversation.nextFollowUpAt = nextFollowUpAt();
+      syncPipelineForListing(listing.id, {
+        status: "AWAITING_REPLY",
+        owner: "LANDLORD",
+        lastOutboundAt: message.sentAt,
+        nextFollowUpAt: conversation.nextFollowUpAt,
+        nextAction: "Wait for agent reply, then parse and route the response."
+      });
+      upsertTask({
+        id: `task-followup-${listing.id}`,
+        userId: user.id,
+        listingId: listing.id,
+        conversationId: conversation.id,
+        type: "FOLLOW_UP",
+        status: "WAITING",
+        priority: "MEDIUM",
+        dueAt: conversation.nextFollowUpAt,
+        title: "Follow up if no reply",
+        body: `Send a concise follow-up for ${listing.title ?? listing.address.raw}.`,
+        riskScore: 30,
+        createdBy: "AGENT"
+      });
+      recordProviderEvent(draft.recommendedChannel === "sms" ? "TWILIO" : "SENDGRID", "message_sent", "message", message.id, {
+        providerMessageId: providerResult.providerMessageId
+      });
       audit(AUDIT_EVENTS.MESSAGE_SENT, "message", message.id, { idempotencyKey });
       return message;
     },
@@ -713,6 +1243,25 @@ export function createAriStore() {
       messages.push(message);
       conversation.status = parsed.recommendedAction === "ask_user" || parsed.recommendedAction === "schedule_tour" ? "NEEDS_USER" : "OPEN";
       conversation.lastMessageAt = message.createdAt;
+      syncPipelineForListing(listing.id, {
+        status:
+          parsed.intent === "TOUR_SLOTS_PROPOSED"
+            ? "TOUR_PROPOSED"
+            : parsed.intent === "APPLICATION_REQUESTED"
+              ? "APPLICATION_REQUESTED"
+              : "REPLIED",
+        owner: parsed.recommendedAction === "ask_user" || parsed.recommendedAction === "schedule_tour" ? "USER" : "ARI",
+        lastInboundAt: message.receivedAt,
+        nextAction:
+          parsed.intent === "TOUR_SLOTS_PROPOSED"
+            ? "Select a tour slot and approve calendar booking."
+            : parsed.intent === "APPLICATION_REQUESTED"
+              ? "Prepare and approve an application packet."
+              : parsed.recommendedAction === "skip"
+                ? "Review risk and decide whether to skip."
+                : "Draft the next reply."
+      });
+      completeTasks((task) => task.listingId === listing.id && task.type === "FOLLOW_UP");
 
       if (parsed.intent === "TOUR_SLOTS_PROPOSED" && parsed.extracted.proposedTourSlots?.length) {
         const tour = createProposedTour({
@@ -731,6 +1280,19 @@ export function createAriStore() {
           payload: { tourId: tour.id, slots: tour.proposedSlots },
           riskScore: 48,
           expiresAt: defaultApprovalExpiry()
+        });
+        upsertTask({
+          id: `task-tour-${tour.id}`,
+          userId: user.id,
+          listingId: listing.id,
+          conversationId: conversation.id,
+          type: "SELECT_TOUR_SLOT",
+          priority: "URGENT",
+          dueAt: addDaysIso(1),
+          title: `Select tour slot for ${listing.title ?? listing.address.raw}`,
+          body: `The agent proposed ${tour.proposedSlots.length} tour windows.`,
+          riskScore: 48,
+          createdBy: "AGENT"
         });
       }
 
@@ -752,9 +1314,37 @@ export function createAriStore() {
             riskScore: 88,
             expiresAt: defaultApprovalExpiry()
           });
+          upsertTask({
+            id: `task-packet-${packet.id}`,
+            userId: user.id,
+            listingId: listing.id,
+            conversationId: conversation.id,
+            type: "APPROVE_PACKET",
+            priority: "URGENT",
+            dueAt: addDaysIso(1),
+            title: `Approve application packet for ${listing.title ?? listing.address.raw}`,
+            body: packet.coverMessage,
+            riskScore: 88,
+            createdBy: "AGENT"
+          });
+        } else {
+          upsertTask({
+            id: `task-doc-gap-${packet.id}`,
+            userId: user.id,
+            listingId: listing.id,
+            conversationId: conversation.id,
+            type: "UPLOAD_DOCUMENT",
+            priority: "HIGH",
+            dueAt: addDaysIso(2),
+            title: "Upload missing application documents",
+            body: packet.checklist?.requiredItems.filter((item) => item.status !== "AVAILABLE").map((item) => item.label).join(", "),
+            riskScore: 52,
+            createdBy: "AGENT"
+          });
         }
       }
 
+      recordProviderEvent("SENDGRID", "inbound_message", "message", message.id, { intent: parsed.intent });
       audit(AUDIT_EVENTS.INBOUND_MESSAGE_RECEIVED, "message", message.id, { intent: parsed.intent });
       return { message, parsed };
     },
@@ -767,6 +1357,7 @@ export function createAriStore() {
       const index = tours.findIndex((candidate) => candidate.id === id);
       if (index < 0) throw new Error("Tour not found");
       tours[index] = selectTourSlot(tours[index]!, slotIndex);
+      completeTasks((task) => task.id === `task-tour-${id}`);
       return tours[index]!;
     },
 
@@ -785,6 +1376,12 @@ export function createAriStore() {
         reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 60 }] }
       });
       tours[index] = confirmTour(tour, event.eventId);
+      syncPipelineForListing(tour.listingId, {
+        status: "TOUR_CONFIRMED",
+        owner: "USER",
+        nextAction: "Attend the tour, then decide whether to apply."
+      });
+      recordProviderEvent("GOOGLE_CALENDAR", "tour_confirmed", "tour", id, { calendarEventId: event.eventId });
       audit(AUDIT_EVENTS.TOUR_CONFIRMED, "tour", id, { calendarEventId: event.eventId });
       return tours[index]!;
     },
@@ -810,6 +1407,7 @@ export function createAriStore() {
         updatedAt: nowIso()
       };
       documents.push(document);
+      completeTasks((task) => task.type === "UPLOAD_DOCUMENT");
       audit(AUDIT_EVENTS.DOCUMENT_UPLOADED, "application_document", document.id, { type });
       return document;
     },
@@ -839,7 +1437,24 @@ export function createAriStore() {
           riskScore: 88,
           expiresAt: defaultApprovalExpiry()
         });
+        upsertTask({
+          id: `task-packet-${packet.id}`,
+          userId: user.id,
+          listingId,
+          type: "APPROVE_PACKET",
+          priority: "URGENT",
+          dueAt: addDaysIso(1),
+          title: `Approve packet for ${getListingOrThrow(listingId).title ?? listingId}`,
+          body: packet.coverMessage,
+          riskScore: 88,
+          createdBy: "AGENT"
+        });
       }
+      syncPipelineForListing(listingId, {
+        status: "APPLICATION_REQUESTED",
+        owner: packet.status === "READY_FOR_REVIEW" ? "USER" : "ARI",
+        nextAction: packet.status === "READY_FOR_REVIEW" ? "Approve the prepared packet before sharing." : "Collect missing documents before sharing."
+      });
       return packet;
     },
 
@@ -854,6 +1469,7 @@ export function createAriStore() {
         approval.status = "APPROVED";
         approval.approvedAt = nowIso();
       }
+      completeTasks((task) => task.id === `task-packet-${id}` || task.approvalId === approval?.id);
       return packet;
     },
 
@@ -864,6 +1480,22 @@ export function createAriStore() {
       packet.status = "SENT";
       packet.sentAt = nowIso();
       packet.updatedAt = nowIso();
+      syncPipelineForListing(packet.listingId, {
+        status: "APPLIED",
+        owner: "LANDLORD",
+        nextAction: "Wait for application response and keep tour follow-ups current."
+      });
+      notificationEvents.push({
+        id: stableHash(["notification", user.id, "packet", packet.id].join(":")).slice(0, 18),
+        userId: user.id,
+        channel: "in_app",
+        status: "SENT",
+        template: "application_packet_sent",
+        entityType: "application_packet",
+        entityId: packet.id,
+        sentAt: nowIso(),
+        createdAt: nowIso()
+      });
       audit(AUDIT_EVENTS.APPLICATION_PACKET_SENT, "application_packet", packet.id, { documentCount: packet.includedDocumentIds.length });
       audit(AUDIT_EVENTS.DOCUMENT_SHARED, "application_packet", packet.id, { secureShareUrl: packet.secureShareUrl });
       return packet;
@@ -884,6 +1516,7 @@ export function createAriStore() {
       approval.status = "APPROVED";
       approval.approvedAt = nowIso();
       approval.updatedAt = nowIso();
+      completeTasks((task) => task.approvalId === id);
       return approval;
     },
 
@@ -893,7 +1526,106 @@ export function createAriStore() {
       approval.status = "REJECTED";
       approval.rejectedAt = nowIso();
       approval.updatedAt = nowIso();
+      for (const task of tasks.filter((candidate) => candidate.approvalId === id)) {
+        task.status = "DISMISSED";
+        task.updatedAt = nowIso();
+      }
       return approval;
+    },
+
+    getAccountSettings() {
+      return {
+        user,
+        accountSettings,
+        consents,
+        authSessions,
+        integrationConnections: integrationConnections.filter((connection) => !connection.userId || connection.userId === user.id)
+      };
+    },
+
+    updateAccountSettings(patch: Partial<AccountSettings>) {
+      Object.assign(accountSettings, patch, { updatedAt: nowIso() });
+      if (patch.email) {
+        user.email = patch.email;
+        profile.email = patch.email;
+      }
+      if (patch.phone) {
+        user.phone = patch.phone;
+        profile.phone = patch.phone;
+      }
+      user.updatedAt = nowIso();
+      profile.updatedAt = nowIso();
+      return accountSettings;
+    },
+
+    listIntegrations() {
+      return {
+        connections: integrationConnections,
+        sourceIngestions: sourceIngestions.slice(-10),
+        providerEvents: providerEvents.slice(-20),
+        webhookEvents: webhookEvents.slice(-20)
+      };
+    },
+
+    connectIntegration(provider: IntegrationProvider, payload: Record<string, unknown> = {}) {
+      const connection = integrationConnections.find((candidate) => candidate.provider === provider);
+      if (!connection) throw new Error(`Integration not found: ${provider}`);
+      connection.status = "CONNECTED";
+      connection.mode = payload.mode === "SANDBOX" ? "SANDBOX" : "PRODUCTION";
+      connection.configRequired = [];
+      connection.lastSyncedAt = nowIso();
+      connection.lastCheckedAt = nowIso();
+      connection.health = { latencyMs: 120, errorRate: 0 };
+      recordProviderEvent(provider, "integration_connected", "integration_connection", connection.id, payload);
+      return connection;
+    },
+
+    disconnectIntegration(provider: IntegrationProvider) {
+      const connection = integrationConnections.find((candidate) => candidate.provider === provider);
+      if (!connection) throw new Error(`Integration not found: ${provider}`);
+      connection.status = "DISCONNECTED";
+      connection.mode = "MOCK";
+      connection.lastCheckedAt = nowIso();
+      connection.health = { lastError: "Disconnected by user" };
+      recordProviderEvent(provider, "integration_disconnected", "integration_connection", connection.id);
+      return connection;
+    },
+
+    recordWebhook(provider: IntegrationProvider, eventType: string, payload: Record<string, unknown> = {}, signatureVerified = false) {
+      const event: WebhookEvent = {
+        id: stableHash(["webhook", provider, eventType, webhookEvents.length].join(":")).slice(0, 18),
+        provider,
+        signatureVerified,
+        status: "PROCESSED",
+        eventType,
+        payload,
+        receivedAt: nowIso(),
+        processedAt: nowIso()
+      };
+      webhookEvents.push(event);
+      recordProviderEvent(provider, eventType, "webhook_event", event.id, payload);
+      return event;
+    },
+
+    getAdminOpsSummary() {
+      return {
+        totals: {
+          users: 1,
+          listings: listings.length,
+          activeSearches: sessions.filter((session) => session.status === "ACTIVE").length,
+          pipeline: pipelineItems.length,
+          openTasks: tasks.filter((task) => task.status === "OPEN").length,
+          pendingApprovals: approvals.filter((approval) => approval.status === "PENDING").length,
+          openFlags: complianceFlags.filter((flag) => flag.status === "OPEN").length
+        },
+        integrations: integrationConnections,
+        workflows: workflowRuns,
+        ingestions: sourceIngestions.slice(-10),
+        providerEvents: providerEvents.slice(-20),
+        webhookEvents: webhookEvents.slice(-20),
+        tasks: tasks.slice(-20),
+        pipeline: this.listPipeline({ limit: 20 })
+      };
     },
 
     resolveComplianceFlag(id: string) {

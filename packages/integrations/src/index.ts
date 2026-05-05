@@ -1,5 +1,6 @@
 export * from "./google-calendar/provider";
 export * from "./google-maps/provider";
+export * from "./mapbox/provider";
 export * from "./openai/provider";
 export * from "./rentcast/client";
 export * from "./rentcast/errors";

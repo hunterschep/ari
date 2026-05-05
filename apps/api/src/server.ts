@@ -4,6 +4,7 @@ import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
 import { createAriStore, type AriStore } from "./store";
 import { registerRoutes } from "./modules/routes";
+import { installAuth } from "./auth/context";
 
 export async function buildServer(options: { store?: AriStore } = {}) {
   const app = Fastify({
@@ -14,6 +15,7 @@ export async function buildServer(options: { store?: AriStore } = {}) {
   await app.register(cors, { origin: true });
   await app.register(multipart);
   await app.register(rateLimit, { max: 300, timeWindow: "1 minute" });
+  installAuth(app, store);
   await registerRoutes(app, store);
 
   app.setErrorHandler((error, _request, reply) => {

@@ -83,6 +83,109 @@ enum ToolCallStatus {
   BLOCKED
 }
 
+enum PipelineStatus {
+  NEW_MATCH
+  DRAFTED
+  APPROVAL_PENDING
+  CONTACTED
+  AWAITING_REPLY
+  REPLIED
+  TOUR_PROPOSED
+  TOUR_CONFIRMED
+  APPLICATION_REQUESTED
+  APPLIED
+  SKIPPED
+  STALE
+  PAUSED
+}
+
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING
+  DONE
+  DISMISSED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum IntegrationProvider {
+  CLERK
+  RENTCAST
+  MAPBOX
+  SENDGRID
+  TWILIO
+  GOOGLE_CALENDAR
+  S3
+  OPENAI
+  TEMPORAL
+  POSTGRES
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DEGRADED
+  DISCONNECTED
+  NEEDS_CONFIG
+  SANDBOX
+}
+
+enum SourceIngestionStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  PARTIAL
+}
+
+enum ProviderEventStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum NotificationChannel {
+  email
+  sms
+  in_app
+}
+
+enum AgentStepKind {
+  MODEL_OUTPUT
+  TOOL_PLAN
+  TOOL_RESULT
+  POLICY_DECISION
+  APPROVAL_REQUEST
+  FINAL_OUTPUT
+}
+
+enum DataRequestType {
+  EXPORT
+  DELETE
+}
+
+enum DataRequestStatus {
+  REQUESTED
+  PROCESSING
+  READY
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
@@ -101,6 +204,15 @@ model User {
   packets        ApplicationPacket[]
   approvals      Approval[]
   auditLogs      AuditLog[]           @relation("ActorAuditLogs")
+  agentRuns      AgentRun[]
+  pipelineItems  ListingPipelineItem[]
+  listingTasks   ListingTask[]
+  accountSettings AccountSettings?
+  integrationConnections IntegrationConnection[]
+  notificationEvents NotificationEvent[]
+  dataRequests  UserDataRequest[]
+  documentShares DocumentShare[]
+  documentAccessLogs DocumentAccessLog[]
 
   @@map("users")
 }
@@ -157,6 +269,8 @@ model SearchSession {
   listingScores ListingScore[]
   savedListings SavedListing[]
   agentRuns     AgentRun[]
+  pipelineItems ListingPipelineItem[]
+  sourceIngestions SourceIngestion[]
 
   @@index([userId, status])
   @@map("search_sessions")
@@ -205,6 +319,8 @@ model Listing {
   tours          Tour[]
   packets        ApplicationPacket[]
   complianceFlags ComplianceFlag[]
+  pipelineItems ListingPipelineItem[]
+  listingTasks  ListingTask[]
 
   @@index([source, sourceListingId])
   @@index([canonicalHash])
@@ -350,9 +466,65 @@ model Conversation {
   drafts   MessageDraft[]
   tours    Tour[]
   complianceFlags ComplianceFlag[]
+  listingTasks ListingTask[]
 
   @@index([userId, status])
   @@map("conversations")
+}
+
+model ListingPipelineItem {
+  id              String         @id @default(cuid())
+  userId          String         @map("user_id")
+  searchSessionId String         @map("search_session_id")
+  listingId       String         @map("listing_id")
+  status          PipelineStatus
+  priority        TaskPriority   @default(MEDIUM)
+  score           Float
+  recommendation  String
+  owner           String         @default("ARI")
+  nextAction      String         @map("next_action")
+  lastOutboundAt  DateTime?      @map("last_outbound_at")
+  lastInboundAt   DateTime?      @map("last_inbound_at")
+  nextFollowUpAt  DateTime?      @map("next_follow_up_at")
+  riskFlagsJson   Json           @default("[]") @map("risk_flags_json")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  searchSession SearchSession @relation(fields: [searchSessionId], references: [id], onDelete: Cascade)
+  listing       Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([searchSessionId, listingId])
+  @@index([userId, status, priority])
+  @@index([listingId, status])
+  @@map("listing_pipeline_items")
+}
+
+model ListingTask {
+  id             String       @id @default(cuid())
+  userId         String       @map("user_id")
+  listingId      String?      @map("listing_id")
+  conversationId String?      @map("conversation_id")
+  approvalId     String?      @map("approval_id")
+  type           String
+  status         TaskStatus   @default(OPEN)
+  priority       TaskPriority @default(MEDIUM)
+  dueAt          DateTime?    @map("due_at")
+  title          String
+  body           String?
+  riskScore      Float        @default(0) @map("risk_score")
+  createdBy      String       @default("SYSTEM") @map("created_by")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing      Listing?      @relation(fields: [listingId], references: [id])
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([userId, status, priority])
+  @@index([listingId, status])
+  @@index([conversationId, status])
+  @@map("listing_tasks")
 }
 
 model Message {
@@ -449,6 +621,7 @@ model ApplicationDocument {
   updatedAt             DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessLogs DocumentAccessLog[]
 
   @@index([userId, type])
   @@map("application_documents")
@@ -472,8 +645,51 @@ model ApplicationPacket {
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  documentShares DocumentShare[]
 
   @@map("application_packets")
+}
+
+model DocumentShare {
+  id              String    @id @default(cuid())
+  userId          String    @map("user_id")
+  packetId        String?   @map("packet_id")
+  documentIdsJson Json      @default("[]") @map("document_ids_json")
+  recipient       String
+  shareUrl        String    @map("share_url")
+  status          String
+  expiresAt       DateTime  @map("expires_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  revokedAt       DateTime? @map("revoked_at")
+
+  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packet     ApplicationPacket?   @relation(fields: [packetId], references: [id])
+  accessLogs DocumentAccessLog[]
+
+  @@index([userId, status])
+  @@map("document_shares")
+}
+
+model DocumentAccessLog {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  documentId String?  @map("document_id")
+  shareId    String?  @map("share_id")
+  actorType  String   @map("actor_type")
+  actorId    String?  @map("actor_id")
+  action     String
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document ApplicationDocument? @relation(fields: [documentId], references: [id])
+  share    DocumentShare?       @relation(fields: [shareId], references: [id])
+
+  @@index([userId, action, createdAt])
+  @@index([documentId])
+  @@index([shareId])
+  @@map("document_access_logs")
 }
 
 model Approval {
@@ -514,8 +730,12 @@ model AgentRun {
   startedAt       DateTime       @map("started_at")
   completedAt     DateTime?      @map("completed_at")
 
+  user          User?          @relation(fields: [userId], references: [id])
   searchSession SearchSession? @relation(fields: [searchSessionId], references: [id])
   toolCalls     ToolCall[]
+  steps         AgentStep[]
+  modelMessages ModelMessage[]
+  policyDecisions PolicyDecisionRecord[]
 
   @@index([agentName, status])
   @@map("agent_runs")
@@ -535,9 +755,82 @@ model ToolCall {
   executedAt     DateTime?      @map("executed_at")
 
   agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+  attempts ToolCallAttempt[]
+  policyDecisions PolicyDecisionRecord[]
 
   @@index([toolName, status])
   @@map("tool_calls")
+}
+
+model AgentStep {
+  id          String        @id @default(cuid())
+  agentRunId  String        @map("agent_run_id")
+  stepIndex   Int           @map("step_index")
+  kind        AgentStepKind
+  inputJson   Json?         @map("input_json")
+  outputJson  Json?         @map("output_json")
+  status      AgentRunStatus
+  createdAt   DateTime      @default(now()) @map("created_at")
+  completedAt DateTime?     @map("completed_at")
+
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  @@unique([agentRunId, stepIndex, kind])
+  @@map("agent_steps")
+}
+
+model ModelMessage {
+  id         String   @id @default(cuid())
+  agentRunId String   @map("agent_run_id")
+  role       String
+  content    String
+  tokenCount Int?     @map("token_count")
+  redacted   Boolean  @default(false)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  @@index([agentRunId, createdAt])
+  @@map("model_messages")
+}
+
+model ToolCallAttempt {
+  id          String         @id @default(cuid())
+  toolCallId  String         @map("tool_call_id")
+  attempt     Int
+  status      ToolCallStatus
+  inputJson   Json           @map("input_json")
+  outputJson  Json?          @map("output_json")
+  error       String?
+  startedAt   DateTime       @map("started_at")
+  completedAt DateTime?      @map("completed_at")
+
+  toolCall ToolCall @relation(fields: [toolCallId], references: [id], onDelete: Cascade)
+
+  @@unique([toolCallId, attempt])
+  @@map("tool_call_attempts")
+}
+
+model PolicyDecisionRecord {
+  id                  String   @id @default(cuid())
+  userId              String?  @map("user_id")
+  agentRunId          String?  @map("agent_run_id")
+  toolCallId          String?  @map("tool_call_id")
+  allowed             Boolean
+  requiresApproval    Boolean  @map("requires_approval")
+  requiresAdminReview Boolean  @map("requires_admin_review")
+  riskScore           Float    @map("risk_score")
+  reasonCodesJson     Json     @default("[]") @map("reason_codes_json")
+  redactedInputJson   Json?    @map("redacted_input_json")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  agentRun AgentRun? @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+  toolCall ToolCall? @relation(fields: [toolCallId], references: [id], onDelete: Cascade)
+
+  @@index([userId, riskScore])
+  @@index([agentRunId])
+  @@index([toolCallId])
+  @@map("policy_decision_records")
 }
 
 model WorkflowRun {
@@ -552,6 +845,167 @@ model WorkflowRun {
   lastError          String?   @map("last_error")
 
   @@map("workflow_runs")
+}
+
+model SourceIngestion {
+  id              String                @id @default(cuid())
+  provider        IntegrationProvider
+  status          SourceIngestionStatus
+  mode            String                @default("MOCK")
+  searchSessionId String?               @map("search_session_id")
+  startedAt       DateTime              @map("started_at")
+  completedAt     DateTime?             @map("completed_at")
+  rowsSeen        Int                   @default(0) @map("rows_seen")
+  rowsImported    Int                   @default(0) @map("rows_imported")
+  rowsRejected    Int                   @default(0) @map("rows_rejected")
+  errorsJson      Json                  @default("[]") @map("errors_json")
+
+  searchSession SearchSession? @relation(fields: [searchSessionId], references: [id])
+
+  @@index([provider, status, startedAt])
+  @@map("source_ingestions")
+}
+
+model ProviderEvent {
+  id          String              @id @default(cuid())
+  provider    IntegrationProvider
+  eventType   String              @map("event_type")
+  status      ProviderEventStatus
+  entityType  String?             @map("entity_type")
+  entityId    String?             @map("entity_id")
+  payloadJson Json                @default("{}") @map("payload_json")
+  receivedAt  DateTime            @map("received_at")
+  processedAt DateTime?           @map("processed_at")
+
+  @@index([provider, eventType, receivedAt])
+  @@index([entityType, entityId])
+  @@map("provider_events")
+}
+
+model WebhookEvent {
+  id                String              @id @default(cuid())
+  provider          IntegrationProvider
+  signatureVerified Boolean             @default(false) @map("signature_verified")
+  status            ProviderEventStatus
+  eventType         String              @map("event_type")
+  payloadJson       Json                @default("{}") @map("payload_json")
+  receivedAt        DateTime            @map("received_at")
+  processedAt       DateTime?           @map("processed_at")
+
+  @@index([provider, eventType, receivedAt])
+  @@map("webhook_events")
+}
+
+model NotificationEvent {
+  id         String             @id @default(cuid())
+  userId     String             @map("user_id")
+  channel    NotificationChannel
+  status     NotificationStatus
+  template   String
+  entityType String?            @map("entity_type")
+  entityId   String?            @map("entity_id")
+  sentAt     DateTime?          @map("sent_at")
+  createdAt  DateTime           @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, createdAt])
+  @@map("notification_events")
+}
+
+model AccountSettings {
+  id                          String   @id @default(cuid())
+  userId                      String   @unique @map("user_id")
+  authProvider                String   @default("LOCAL_DEMO") @map("auth_provider")
+  clerkUserId                 String?  @unique @map("clerk_user_id")
+  legalName                   String?  @map("legal_name")
+  email                       String
+  phone                       String?
+  timezone                    String   @default("America/New_York")
+  notificationPreferencesJson Json     @default("{}") @map("notification_preferences_json")
+  securityJson                Json     @default("{}") @map("security_json")
+  dataControlsJson            Json     @default("{}") @map("data_controls_json")
+  createdAt                   DateTime @default(now()) @map("created_at")
+  updatedAt                   DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("account_settings")
+}
+
+model IntegrationConnection {
+  id             String            @id @default(cuid())
+  userId         String?           @map("user_id")
+  provider       IntegrationProvider
+  status         IntegrationStatus
+  mode           String            @default("MOCK")
+  label          String
+  scopesJson     Json              @default("[]") @map("scopes_json")
+  lastCheckedAt  DateTime          @map("last_checked_at")
+  lastSyncedAt   DateTime?         @map("last_synced_at")
+  configRequired Json              @default("[]") @map("config_required")
+  healthJson     Json              @default("{}") @map("health_json")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, provider])
+  @@index([provider, status])
+  @@map("integration_connections")
+}
+
+model UserDataRequest {
+  id          String            @id @default(cuid())
+  userId      String            @map("user_id")
+  type        DataRequestType
+  status      DataRequestStatus
+  requestedAt DateTime          @default(now()) @map("requested_at")
+  completedAt DateTime?         @map("completed_at")
+  exportUrl   String?           @map("export_url")
+  notes       String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type, status])
+  @@map("user_data_requests")
+}
+
+model FeatureFlag {
+  key            String   @id
+  enabled        Boolean  @default(false)
+  description    String?
+  rolloutPercent Float    @default(0) @map("rollout_percent")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("feature_flags")
+}
+
+model GeocodeCache {
+  id               String   @id @default(cuid())
+  addressHash      String   @unique @map("address_hash")
+  provider         IntegrationProvider
+  formattedAddress String   @map("formatted_address")
+  lat              Float
+  lng              Float
+  confidence       Float    @default(1)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("geocode_cache")
+}
+
+model RouteCache {
+  id              String   @id @default(cuid())
+  routeHash       String   @unique @map("route_hash")
+  provider        IntegrationProvider
+  origin          String
+  destination     String
+  durationMinutes Int      @map("duration_minutes")
+  distanceMiles   Float    @map("distance_miles")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("route_cache")
 }
 
 model ComplianceFlag {

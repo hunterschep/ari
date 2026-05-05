@@ -10,6 +10,7 @@ import {
   parseInboundMessage,
   rankListings
 } from "@ari/agents";
+import { AccountSettingsSchema, ListingPipelineItemSchema, MapSearchResponseSchema } from "@ari/schemas";
 import { demoDocuments, demoProfile, demoSession } from "../../apps/web/lib/mock";
 
 describe("domain logic", () => {
@@ -159,5 +160,60 @@ describe("domain logic", () => {
       { ...listing, id: "comp-2", price: 3700 }
     ]);
     expect(pricing.moveInCostEstimate.totalKnownCost).toBeGreaterThan(listing.price);
+  });
+
+  it("validates v1 enterprise workflow contracts", () => {
+    const pipeline = ListingPipelineItemSchema.parse({
+      id: "pipeline-test",
+      userId: "user-demo",
+      searchSessionId: "search-demo",
+      listingId: "listing-demo",
+      status: "APPROVAL_PENDING",
+      priority: "HIGH",
+      score: 91,
+      recommendation: "CONTACT_NOW",
+      owner: "USER",
+      nextAction: "Approve the drafted outreach.",
+      riskFlags: ["NYC_FARE_ACT_POTENTIAL_VIOLATION"],
+      createdAt: "2026-05-05T00:00:00.000Z",
+      updatedAt: "2026-05-05T00:00:00.000Z"
+    });
+    expect(pipeline.status).toBe("APPROVAL_PENDING");
+
+    const account = AccountSettingsSchema.parse({
+      id: "account-test",
+      userId: "user-demo",
+      authProvider: "CLERK",
+      email: "alex.renter@example.com",
+      timezone: "America/New_York",
+      notificationPreferences: { email: true, sms: false, push: false },
+      security: { mfaEnabled: true, sessions: 1 },
+      dataControls: { allowTraining: false, retainApplicationDocs: true, redactFinancialsByDefault: true },
+      createdAt: "2026-05-05T00:00:00.000Z",
+      updatedAt: "2026-05-05T00:00:00.000Z"
+    });
+    expect(account.authProvider).toBe("CLERK");
+
+    const map = MapSearchResponseSchema.parse({
+      searchSessionId: "search-demo",
+      center: { lat: 40.72, lng: -73.96 },
+      bounds: { north: 40.8, south: 40.6, east: -73.8, west: -74.1 },
+      features: [
+        {
+          id: "map-listing-demo",
+          listingId: "listing-demo",
+          lat: 40.72,
+          lng: -73.96,
+          status: "NEW_MATCH",
+          score: 89,
+          price: 3650,
+          title: "1 bed near McCarren Park",
+          neighborhood: "Brooklyn",
+          warningCount: 0,
+          commuteMinutes: 24
+        }
+      ]
+    });
+    expect(map.features).toHaveLength(1);
   });
 });

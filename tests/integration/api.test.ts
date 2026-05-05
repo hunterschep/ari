@@ -88,4 +88,43 @@ describe("api", () => {
 
     await app.close();
   });
+
+  it("exposes enterprise pipeline, map, account, and integration surfaces", async () => {
+    const store = createAriStore();
+    const app = await buildServer({ store });
+
+    const dashboard = await app.inject({ method: "GET", url: "/v1/dashboard" });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.json().summary.pipelineItems).toBeGreaterThan(0);
+    expect(dashboard.json().tasks.length).toBeGreaterThan(0);
+
+    const inquiries = await app.inject({ method: "GET", url: "/v1/search-sessions/search-demo/inquiries" });
+    expect(inquiries.statusCode).toBe(200);
+    const firstInquiry = inquiries.json()[0];
+    expect(firstInquiry.pipeline.nextAction).toBeTruthy();
+
+    const map = await app.inject({ method: "GET", url: "/v1/search-sessions/search-demo/map" });
+    expect(map.statusCode).toBe(200);
+    expect(map.json().features.length).toBe(inquiries.json().length);
+    expect(map.json().features[0].lat).toBeGreaterThan(40);
+
+    const action = await app.inject({
+      method: "POST",
+      url: `/v1/listing-pipeline/${firstInquiry.pipeline.id}/actions`,
+      payload: { action: "DRAFT_OUTREACH" }
+    });
+    expect(action.statusCode).toBe(200);
+    expect(action.json().draft.status).toBe("PENDING_APPROVAL");
+    expect(action.json().pipeline.status).toBe("APPROVAL_PENDING");
+
+    const account = await app.inject({ method: "GET", url: "/v1/account/settings" });
+    expect(account.statusCode).toBe(200);
+    expect(account.json().accountSettings.email).toBe("alex.renter@example.com");
+
+    const integrations = await app.inject({ method: "GET", url: "/v1/integrations" });
+    expect(integrations.statusCode).toBe(200);
+    expect(integrations.json().connections.some((connection: { provider: string }) => connection.provider === "MAPBOX")).toBe(true);
+
+    await app.close();
+  });
 });
