@@ -47,6 +47,7 @@ import type {
   Tour,
   ToolCall,
   UserConsent,
+  UserDataRequest,
   WebhookEvent
 } from "@ari/schemas";
 import {
@@ -68,6 +69,22 @@ export type AriUser = {
   role: "RENTER" | "ADMIN" | "OPS" | "DEVELOPER";
   createdAt: string;
   updatedAt: string;
+};
+
+export type DocumentUploadSession = {
+  id: string;
+  userId: string;
+  fileName: string;
+  mimeType: string;
+  expectedSizeBytes: number;
+  checksumSha256?: string;
+  storageKey: string;
+  uploadUrl: string;
+  status: "PENDING" | "COMPLETED" | "EXPIRED" | "REJECTED";
+  expiresAt: string;
+  documentId?: string;
+  createdAt: string;
+  completedAt?: string;
 };
 
 export type AriStore = ReturnType<typeof createAriStore>;
@@ -251,6 +268,7 @@ export function createAriStore() {
       updatedAt: nowIso()
     }
   ];
+  const uploadSessions: DocumentUploadSession[] = [];
   const packets: ApplicationPacket[] = [];
   const agentRuns: AgentRun[] = [];
   const toolCalls: ToolCall[] = [];
@@ -335,6 +353,7 @@ export function createAriStore() {
   const providerEvents: ProviderEvent[] = [];
   const webhookEvents: WebhookEvent[] = [];
   const notificationEvents: NotificationEvent[] = [];
+  const dataRequests: UserDataRequest[] = [];
   const pipelineItems: ListingPipelineItem[] = scores.map((score) => {
     const listing = listings.find((candidate) => candidate.id === score.listingId)!;
     return createPipelineItem(score, listing, sessions[0]!.id);
@@ -544,6 +563,16 @@ export function createAriStore() {
     return session;
   }
 
+  function httpError(statusCode: number, message: string) {
+    const error = new Error(message);
+    (error as Error & { statusCode?: number }).statusCode = statusCode;
+    return error;
+  }
+
+  function safeStorageFileName(fileName: string) {
+    return fileName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+  }
+
   function createApproval(input: Omit<Approval, "id" | "status" | "createdAt" | "updatedAt">) {
     const approval: Approval = {
       ...input,
@@ -588,6 +617,7 @@ export function createAriStore() {
     approvals,
     tours,
     documents,
+    uploadSessions,
     packets,
     agentRuns,
     toolCalls,
@@ -601,6 +631,7 @@ export function createAriStore() {
     providerEvents,
     webhookEvents,
     notificationEvents,
+    dataRequests,
     pipelineItems,
     tasks,
 
@@ -673,6 +704,28 @@ export function createAriStore() {
       consent.revokedAt = nowIso();
       audit(AUDIT_EVENTS.USER_REVOKED_CONSENT, "user_consent", id);
       return consent;
+    },
+
+    listDataRequests() {
+      return dataRequests.filter((request) => request.userId === user.id);
+    },
+
+    createDataRequest(input: { type: UserDataRequest["type"]; notes?: string }) {
+      const existingOpenRequest = dataRequests.find(
+        (request) => request.userId === user.id && request.type === input.type && ["REQUESTED", "PROCESSING"].includes(request.status)
+      );
+      if (existingOpenRequest) return existingOpenRequest;
+      const request: UserDataRequest = {
+        id: stableHash(["data-request", user.id, input.type, dataRequests.length, nowIso()].join(":")).slice(0, 18),
+        userId: user.id,
+        type: input.type,
+        status: "REQUESTED",
+        requestedAt: nowIso(),
+        notes: input.notes
+      };
+      dataRequests.push(request);
+      audit("USER_DATA_REQUESTED", "user_data_request", request.id, { type: request.type });
+      return request;
     },
 
     getProfile() {
@@ -1136,7 +1189,6 @@ export function createAriStore() {
 
     async sendDraft(id: string) {
       const draft = this.getDraft(id);
-      if (draft.status !== "APPROVED") throw new Error("Draft must be approved before sending");
       const listing = getListingOrThrow(draft.listingId);
       const conversation = draft.conversationId ? conversations.find((candidate) => candidate.id === draft.conversationId) ?? createConversationForListing(listing) : createConversationForListing(listing);
       const contact = listing.contacts.find((candidate) => candidate.id === conversation.contactId) ?? listing.contacts[0];
@@ -1147,12 +1199,16 @@ export function createAriStore() {
         templateVersion: "availability_inquiry_v1",
         body: draft.body
       });
+      const messageId = stableHash(["message", idempotencyKey].join(":")).slice(0, 18);
+      const existingMessage = messages.find((candidate) => candidate.id === messageId);
+      if (existingMessage) return existingMessage;
+      if (draft.status !== "APPROVED") throw new Error("Draft must be approved before sending");
       const providerResult =
         draft.recommendedChannel === "sms"
           ? await smsProvider.send({ from: user.phone ?? "+12125550100", to: contact?.phone ?? "+12125550101", body: draft.body })
           : await emailProvider.send({ from: user.email, to: contact?.email ?? "leasing@example.com", subject: draft.subject ?? "Apartment inquiry", text: draft.body });
       const message: Message = {
-        id: stableHash(["message", idempotencyKey].join(":")).slice(0, 18),
+        id: messageId,
         conversationId: conversation.id,
         direction: "OUTBOUND",
         channel: draft.recommendedChannel,
@@ -1365,6 +1421,7 @@ export function createAriStore() {
       const index = tours.findIndex((candidate) => candidate.id === id);
       if (index < 0) throw new Error("Tour not found");
       const tour = tours[index]!;
+      if (tour.status === "CONFIRMED" && tour.calendarEventId) return tour;
       if (!tour.selectedSlot) throw new Error("Tour slot must be selected first");
       const listing = getListingOrThrow(tour.listingId);
       const event = await calendarProvider.createEvent({
@@ -1390,7 +1447,65 @@ export function createAriStore() {
       return storageProvider.createUploadUrl({ userId: user.id, fileName: input.fileName, contentType: input.contentType });
     },
 
+    async createUploadSession(input: { fileName: string; mimeType: string; sizeBytes: number; checksumSha256?: string }) {
+      const createdAt = nowIso();
+      const sessionId = stableHash(["upload-session", user.id, input.fileName, input.mimeType, input.sizeBytes, input.checksumSha256 ?? "", createdAt].join(":")).slice(0, 18);
+      const upload = await storageProvider.createUploadUrl({
+        userId: user.id,
+        fileName: `documents/${sessionId}/${safeStorageFileName(input.fileName)}`,
+        contentType: input.mimeType
+      });
+      const session: DocumentUploadSession = {
+        id: sessionId,
+        userId: user.id,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        expectedSizeBytes: input.sizeBytes,
+        checksumSha256: input.checksumSha256,
+        storageKey: upload.storageKey,
+        uploadUrl: upload.uploadUrl,
+        status: "PENDING",
+        expiresAt: upload.expiresAt,
+        createdAt
+      };
+      uploadSessions.push(session);
+      audit("DOCUMENT_UPLOAD_SESSION_CREATED", "document_upload_session", session.id, { fileName: input.fileName, mimeType: input.mimeType });
+      return session;
+    },
+
+    completeUploadSession(id: string, input: { storageKey: string; sizeBytes: number; checksumSha256?: string }) {
+      const session = uploadSessions.find((candidate) => candidate.id === id);
+      if (!session) throw httpError(404, "Upload session not found");
+      if (session.status === "COMPLETED" && session.documentId) {
+        const document = documents.find((candidate) => candidate.id === session.documentId);
+        if (document) return { session, document };
+      }
+      if (session.status !== "PENDING") throw httpError(409, `Upload session is ${session.status.toLowerCase()}`);
+      if (new Date(session.expiresAt).getTime() < Date.now()) {
+        session.status = "EXPIRED";
+        throw httpError(410, "Upload session expired");
+      }
+      if (input.storageKey !== session.storageKey) throw httpError(409, "Uploaded storage key does not match the server-issued upload session");
+      if (input.sizeBytes !== session.expectedSizeBytes) throw httpError(409, "Uploaded file size does not match the server-issued upload session");
+      if (session.checksumSha256 && input.checksumSha256 !== session.checksumSha256) {
+        throw httpError(409, "Uploaded file checksum does not match the server-issued upload session");
+      }
+      const document = this.completeUpload({
+        fileName: session.fileName,
+        mimeType: session.mimeType,
+        storageKey: session.storageKey,
+        sizeBytes: input.sizeBytes
+      });
+      session.status = "COMPLETED";
+      session.documentId = document.id;
+      session.completedAt = nowIso();
+      audit("DOCUMENT_UPLOAD_SESSION_COMPLETED", "document_upload_session", session.id, { documentId: document.id });
+      return { session, document };
+    },
+
     completeUpload(input: { fileName: string; mimeType: string; storageKey: string; sizeBytes: number; type?: ApplicationDocument["type"] }) {
+      const existing = documents.find((candidate) => candidate.storageKey === input.storageKey && candidate.status !== "DELETED");
+      if (existing) return existing;
       const type = input.type ?? classifyDocument(input.fileName);
       const document: ApplicationDocument = {
         id: stableHash(["doc", user.id, input.storageKey].join(":")).slice(0, 18),
@@ -1426,6 +1541,8 @@ export function createAriStore() {
 
     generatePacket(listingId: string, requestedDocuments: string[] = []) {
       const packet = generateApplicationPacket({ renter: profile, listing: getListingOrThrow(listingId), documents, requestedDocuments });
+      const existing = packets.find((candidate) => candidate.id === packet.id && candidate.status !== "WITHDRAWN");
+      if (existing) return existing;
       packets.push(packet);
       if (packet.status === "READY_FOR_REVIEW") {
         createApproval({
@@ -1461,6 +1578,8 @@ export function createAriStore() {
     approvePacket(id: string) {
       const packet = packets.find((candidate) => candidate.id === id);
       if (!packet) throw new Error("Packet not found");
+      if (packet.status === "APPROVED" || packet.status === "SENT") return packet;
+      if (packet.status !== "READY_FOR_REVIEW") throw new Error("Packet must be ready for review before approval");
       packet.status = "APPROVED";
       packet.approvedAt = nowIso();
       packet.updatedAt = nowIso();
@@ -1476,6 +1595,7 @@ export function createAriStore() {
     sendPacket(id: string) {
       const packet = packets.find((candidate) => candidate.id === id);
       if (!packet) throw new Error("Packet not found");
+      if (packet.status === "SENT") return packet;
       if (packet.status !== "APPROVED") throw new Error("Packet must be approved before sending");
       packet.status = "SENT";
       packet.sentAt = nowIso();

@@ -3,7 +3,7 @@ import { buildServer } from "../../apps/api/src/server";
 import { createAriStore } from "../../apps/api/src/store";
 
 test("Playwright API journey covers the MVP demo path", async ({ request }) => {
-  const server = await buildServer({ store: createAriStore() });
+  const server = await buildServer({ store: createAriStore(), auth: { allowLocalFallback: true } });
   await server.listen({ port: 4011, host: "127.0.0.1" });
 
   const base = "http://127.0.0.1:4011";

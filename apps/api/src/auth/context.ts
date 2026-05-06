@@ -2,6 +2,10 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { verifyToken } from "@clerk/backend";
 import type { AriStore, AriUser } from "../store";
 
+export type AuthOptions = {
+  allowLocalFallback?: boolean;
+};
+
 export type AriRequestContext = {
   userId: string;
   clerkUserId?: string;
@@ -27,10 +31,10 @@ const publicPathMatchers = [
   /^\/v1\/webhooks\//
 ];
 
-export function installAuth(app: FastifyInstance, store: AriStore) {
+export function installAuth(app: FastifyInstance, store: AriStore, options: AuthOptions = {}) {
   app.addHook("preHandler", async (request, reply) => {
     if (publicPathMatchers.some((matcher) => matcher.test(request.url))) return;
-    request.ari = await authenticateRequest(request, store);
+    request.ari = await authenticateRequest(request, store, options);
 
     if (request.url.startsWith("/v1/admin")) {
       await requireAnyRole(["ADMIN", "OPS"], request, reply);
@@ -43,15 +47,16 @@ export async function requireAnyRole(roles: AriUser["role"][], request: FastifyR
     reply.status(401).send({ error: "Unauthorized", message: "Authentication required" });
     return;
   }
-  if (request.ari.authProvider === "LOCAL_DEMO") return;
   if (!roles.includes(request.ari.role)) {
     reply.status(403).send({ error: "Forbidden", message: `Requires one of: ${roles.join(", ")}` });
   }
 }
 
-async function authenticateRequest(request: FastifyRequest, store: AriStore): Promise<AriRequestContext> {
+async function authenticateRequest(request: FastifyRequest, store: AriStore, options: AuthOptions): Promise<AriRequestContext> {
   const secretKey = process.env.CLERK_SECRET_KEY;
-  const localFallback = process.env.ENABLE_LOCAL_AUTH_FALLBACK !== "false";
+  const localFallback =
+    options.allowLocalFallback === true ||
+    (process.env.NODE_ENV !== "production" && process.env.ENABLE_LOCAL_AUTH_FALLBACK === "true");
   const authHeader = request.headers.authorization;
   const token = authHeader?.replace(/^Bearer\s+/i, "");
 

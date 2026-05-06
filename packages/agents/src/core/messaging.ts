@@ -60,6 +60,16 @@ export function createFollowUpDraft(input: {
 
 export function parseInboundMessage(body: string, referenceDate = new Date("2026-05-05T12:00:00-04:00")): InboundMessageParse {
   const text = body.toLowerCase();
+  if (looksLikePromptInjectionOrSensitiveExfiltration(text)) {
+    return {
+      intent: "SCAM_RISK",
+      extracted: {
+        questionsForUser: ["Landlord message contains system-style instructions, approval claims, or sensitive data requests."]
+      },
+      confidence: 96,
+      recommendedAction: "escalate"
+    };
+  }
   const proposedTourSlots = extractTourSlots(body, referenceDate);
   const requestedDocuments = [
     text.includes("proof of income") ? "PAYSTUB" : undefined,
@@ -134,6 +144,20 @@ export function parseInboundMessage(body: string, referenceDate = new Date("2026
     confidence: 45,
     recommendedAction: "ask_user"
   };
+}
+
+function looksLikePromptInjectionOrSensitiveExfiltration(text: string) {
+  const systemStyleInstruction =
+    /ignore (all )?(previous|prior) instructions/.test(text) ||
+    /system notice\s*:/.test(text) ||
+    /developer message\s*:/.test(text);
+  const falseApprovalClaim = /renter already approved/.test(text) || /already approved (the )?application/.test(text);
+  const automaticActionInstruction = /confirm automatically/.test(text) || /submit all documents/.test(text);
+  const sensitiveDataRequest =
+    /send me .*?(paystub|pay stub|bank statement|tax doc|tax return|id document|passport|license|all documents)/.test(text) ||
+    /text me .*?(phone number|income|employer|paystub|bank statement)/.test(text) ||
+    (/verify you are human/.test(text) && /(phone number|income|employer|paystub|bank statement)/.test(text));
+  return systemStyleInstruction || falseApprovalClaim || automaticActionInstruction || sensitiveDataRequest;
 }
 
 function extractTourSlots(body: string, referenceDate: Date) {
